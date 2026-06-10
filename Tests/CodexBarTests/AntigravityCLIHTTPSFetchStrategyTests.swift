@@ -225,9 +225,14 @@ struct AntigravityCLIHTTPSFetchStrategyTests {
     }
 
     @Test
-    func `cli HTTPS resets session only for short lived CLI runtime`() {
+    func `cli HTTPS resets session only for one-shot CLI runtime`() {
+        // One-shot CLI invocation: reset after fetch.
         #expect(AntigravityCLIHTTPSFetchStrategy.shouldResetSessionAfterFetch(self.makeFetchContext(runtime: .cli)))
+        // App runtime keeps the warm session.
         #expect(!AntigravityCLIHTTPSFetchStrategy.shouldResetSessionAfterFetch(self.makeFetchContext(runtime: .app)))
+        // Long-lived CLI host (codexbar serve) keeps the warm session even at .cli runtime.
+        #expect(!AntigravityCLIHTTPSFetchStrategy.shouldResetSessionAfterFetch(
+            self.makeFetchContext(runtime: .cli, persistsCLISessions: true)))
     }
 
     @Test
@@ -579,6 +584,7 @@ struct AntigravityCLIHTTPSFetchStrategyTests {
         runtime: ProviderRuntime = .app,
         sourceMode: ProviderSourceMode = .auto,
         selectedTokenAccountID: UUID? = nil,
+        persistsCLISessions: Bool = false,
         env: [String: String] = [:]) -> ProviderFetchContext
     {
         ProviderFetchContext(
@@ -593,7 +599,8 @@ struct AntigravityCLIHTTPSFetchStrategyTests {
             fetcher: UsageFetcher(environment: env),
             claudeFetcher: StubClaudeFetcher(),
             browserDetection: BrowserDetection(cacheTTL: 0),
-            selectedTokenAccountID: selectedTokenAccountID)
+            selectedTokenAccountID: selectedTokenAccountID,
+            persistsCLISessions: persistsCLISessions)
     }
 
     private func makeUsage(accountEmail: String?) -> UsageSnapshot {

@@ -141,7 +141,20 @@ actor CLIServeResponseCache {
         let response: CLILocalHTTPResponse
     }
 
+    struct CachePolicy {
+        /// How long a successful response stays fresh.
+        let ttl: TimeInterval
+        /// How long a last-good response may stand in for a failed refresh.
+        let staleTTL: TimeInterval
+    }
+
+    private struct LastGoodEntry {
+        let recordedAt: Date
+        let response: CLILocalHTTPResponse
+    }
+
     private var entries: [String: Entry] = [:]
+    private var lastGood: [String: LastGoodEntry] = [:]
     private var inFlightKeys: Set<String> = []
     private var waiters: [String: [CheckedContinuation<CLIServeCacheLookup, Never>]] = [:]
 
@@ -170,21 +183,45 @@ actor CLIServeResponseCache {
         return .miss
     }
 
+    /// Completes an in-flight fetch and returns the response delivered to
+    /// waiters. Successful responses are cached normally. Failed fetches
+    /// fall back to the last good response when one was recorded within
+    /// `staleTTL`, so transient provider errors do not blank out consumers
+    /// that poll this endpoint (status bars hide items on error payloads).
     fileprivate func completeFetch(
         _ response: CLILocalHTTPResponse,
         for key: String,
-        ttl: TimeInterval,
+        policy: CachePolicy,
         now: Date,
-        shouldCache: Bool)
+        shouldCache: Bool) -> CLILocalHTTPResponse
     {
+        let delivered: CLILocalHTTPResponse
         if shouldCache {
-            self.store(response, for: key, ttl: ttl, now: now)
+            self.store(response, for: key, ttl: policy.ttl, now: now)
+            self.lastGood[key] = LastGoodEntry(recordedAt: now, response: response)
+            delivered = response
+        } else {
+            delivered = self.staleResponse(for: key, staleTTL: policy.staleTTL, now: now) ?? response
         }
         self.inFlightKeys.remove(key)
         let waiters = self.waiters.removeValue(forKey: key) ?? []
         for waiter in waiters {
-            waiter.resume(returning: .response(response))
+            waiter.resume(returning: .response(delivered))
         }
+        return delivered
+    }
+
+    private func staleResponse(
+        for key: String,
+        staleTTL: TimeInterval,
+        now: Date) -> CLILocalHTTPResponse?
+    {
+        guard staleTTL > 0, let entry = self.lastGood[key] else { return nil }
+        guard now.timeIntervalSince(entry.recordedAt) <= staleTTL else {
+            self.lastGood[key] = nil
+            return nil
+        }
+        return entry.response
     }
 
     private func store(_ response: CLILocalHTTPResponse, for key: String, ttl: TimeInterval, now: Date) {
@@ -403,13 +440,14 @@ extension CodexBarCLI {
             let response = await Self.serveResponseWithDeadline(seconds: requestTimeout) {
                 await makeResponse()
             }
-            await cache.completeFetch(
+            return await cache.completeFetch(
                 response,
                 for: key,
-                ttl: refreshInterval,
+                policy: CLIServeResponseCache.CachePolicy(
+                    ttl: refreshInterval,
+                    staleTTL: Self.serveStaleTTL(refreshInterval: refreshInterval)),
                 now: Date(),
                 shouldCache: Self.shouldCacheServeResponse(response))
-            return response
         }
     }
 
@@ -444,6 +482,15 @@ extension CodexBarCLI {
             }
             state.setTimeoutTask(timeoutTask)
         }
+    }
+
+    /// How long a last-good response may be served in place of a failed
+    /// refresh. Bounded so consumers never see hours-stale data: ten refresh
+    /// intervals, with a five-minute floor for short intervals. Zero (stale
+    /// fallback disabled) when response caching is disabled.
+    static func serveStaleTTL(refreshInterval: TimeInterval) -> TimeInterval {
+        guard refreshInterval > 0 else { return 0 }
+        return max(refreshInterval * 10, 300)
     }
 
     static func shouldCacheServeResponse(_ response: CLILocalHTTPResponse) -> Bool {
@@ -494,7 +541,8 @@ extension CodexBarCLI {
             includeAllCodexAccounts: true,
             fetcher: UsageFetcher(),
             claudeFetcher: ClaudeUsageFetcher(browserDetection: browserDetection),
-            browserDetection: browserDetection)
+            browserDetection: browserDetection,
+            persistCLISessions: true)
 
         var output = UsageCommandOutput()
         for provider in selection.asList {

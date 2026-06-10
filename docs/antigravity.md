@@ -44,7 +44,13 @@ When the Antigravity desktop app is running:
 
 1. **Process detection**
    - Command: `ps -ax -o pid=,command=`.
-   - Match either:
+   - The desktop local strategy scopes detection to **IDE** language servers only
+     (`AntigravityStatusProbe(processScope: .ideOnly)`). It deliberately does **not**
+     attach to an `agy` CLI process: a stale or still-initializing `agy` accepts the
+     connection but returns transient `GetUserStatus` errors, which would burn the
+     probe timeout. `agy` is owned exclusively by the CLI HTTPS source below, which
+     waits for real API readiness. The probe still classifies both kinds
+     (`processInfo(scope: .ideAndCLI)` is used by `isRunning()` for status reporting):
      - the **IDE** language server: process name `language_server_macos` plus Antigravity
        markers (`--app_data_dir antigravity` OR path contains `/antigravity/`); or
      - the **CLI**: an `antigravity-cli` / `antigravity_cli` path segment, or the

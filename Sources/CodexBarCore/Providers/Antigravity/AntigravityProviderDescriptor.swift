@@ -65,7 +65,12 @@ struct AntigravityStatusFetchStrategy: ProviderFetchStrategy {
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        let probe = AntigravityStatusProbe()
+        // IDE-only: `agy` is owned by AntigravityCLIHTTPSFetchStrategy, which
+        // waits for real API readiness. Probing a half-warmed `agy` here would
+        // burn the timeout on a process that is not yet answering, so the
+        // local probe only handles the running-desktop case and otherwise
+        // fails over to the CLI strategy.
+        let probe = AntigravityStatusProbe(processScope: .ideOnly)
         let snap = try await probe.fetch()
         let usage = try snap.toUsageSnapshot()
         try AntigravitySelectedAccountGuard.validate(usage, context: context)
@@ -148,7 +153,9 @@ struct AntigravityCLIHTTPSFetchStrategy: ProviderFetchStrategy {
     }
 
     static func shouldResetSessionAfterFetch(_ context: ProviderFetchContext) -> Bool {
-        context.runtime == .cli
+        // Long-lived hosts (the app, `codexbar serve`) keep the warm `agy`
+        // session between fetches; only one-shot CLI invocations reset it.
+        context.runtime == .cli && !context.persistsCLISessions
     }
 
     /// Waits for real API readiness, not just socket readiness. Fresh ``agy``

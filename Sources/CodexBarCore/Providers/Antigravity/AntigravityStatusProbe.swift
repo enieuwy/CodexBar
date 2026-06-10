@@ -408,7 +408,20 @@ public enum AntigravityStatusProbeError: LocalizedError, Sendable, Equatable {
 }
 
 public struct AntigravityStatusProbe: Sendable {
+    /// Which local Antigravity processes the probe may attach to.
+    public enum ProcessScope: Sendable {
+        /// Match the IDE language server and the `agy` CLI language server.
+        case ideAndCLI
+        /// Match only the IDE language server. The local fetch strategy
+        /// uses this so it never attaches to a stale or half-warmed `agy`
+        /// process: those accept connections but return transient errors
+        /// on `GetUserStatus`, burning the probe timeout. `agy` is owned
+        /// by `AntigravityCLIHTTPSFetchStrategy`, which has a readiness loop.
+        case ideOnly
+    }
+
     public var timeout: TimeInterval = 8.0
+    public var processScope: ProcessScope = .ideAndCLI
 
     private static let getUserStatusPath = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
     private static let commandModelConfigPath =
@@ -416,12 +429,13 @@ public struct AntigravityStatusProbe: Sendable {
     private static let unleashPath = "/exa.language_server_pb.LanguageServerService/GetUnleashData"
     private static let log = CodexBarLog.logger(LogCategories.antigravity)
 
-    public init(timeout: TimeInterval = 8.0) {
+    public init(timeout: TimeInterval = 8.0, processScope: ProcessScope = .ideAndCLI) {
         self.timeout = timeout
+        self.processScope = processScope
     }
 
     public func fetch() async throws -> AntigravityStatusSnapshot {
-        let processInfo = try await Self.detectProcessInfo(timeout: self.timeout)
+        let processInfo = try await Self.detectProcessInfo(timeout: self.timeout, scope: self.processScope)
         let ports = try await Self.listeningPorts(pid: processInfo.pid, timeout: self.timeout)
         let endpoint = try await Self.resolveWorkingEndpoint(
             candidateEndpoints: Self.connectionCandidates(
@@ -617,7 +631,10 @@ public struct AntigravityStatusProbe: Sendable {
         }
     }
 
-    private static func detectProcessInfo(timeout: TimeInterval) async throws -> ProcessInfoResult {
+    private static func detectProcessInfo(
+        timeout: TimeInterval,
+        scope: ProcessScope = .ideAndCLI) async throws -> ProcessInfoResult
+    {
         let env = ProcessInfo.processInfo.environment
         let result = try await SubprocessRunner.run(
             binary: "/bin/ps",
@@ -626,16 +643,20 @@ public struct AntigravityStatusProbe: Sendable {
             timeout: timeout,
             label: "antigravity-ps")
 
-        return try Self.processInfo(fromProcessListOutput: result.stdout)
+        return try Self.processInfo(fromProcessListOutput: result.stdout, scope: scope)
     }
 
-    static func processInfo(fromProcessListOutput output: String) throws -> ProcessInfoResult {
+    static func processInfo(
+        fromProcessListOutput output: String,
+        scope: ProcessScope = .ideAndCLI) throws -> ProcessInfoResult
+    {
         let lines = output.split(separator: "\n")
         var sawTokenlessIDE = false
         for line in lines {
             let text = String(line)
             guard let match = Self.matchProcessLine(text) else { continue }
             guard let kind = Self.antigravityProcessKind(match.command) else { continue }
+            if scope == .ideOnly, kind == .cli { continue }
             // The IDE language server authenticates local requests with a
             // `--csrf_token` and must keep requiring it: skip a tokenless IDE
             // match so a later valid IDE server can still be found (and surface
