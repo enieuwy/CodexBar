@@ -120,7 +120,7 @@ private struct ServeHealthPayload: Encodable {
     let status: String
 }
 
-struct CLIServeConfigSnapshot: Sendable {
+struct CLIServeConfigSnapshot {
     let config: CodexBarConfig
     let cacheToken: String
 }
@@ -191,6 +191,8 @@ enum CLIServeCacheLookup {
 }
 
 actor CLIServeResponseCache {
+    static let maximumStaleTTL: TimeInterval = 3600
+
     private struct Entry {
         let expiresAt: Date
         let response: CLILocalHTTPResponse
@@ -230,6 +232,15 @@ actor CLIServeResponseCache {
 
     private func pruneExpiredEntries(now: Date) {
         self.entries = self.entries.filter { $0.value.expiresAt > now }
+        self.lastGood = self.lastGood.filter {
+            now.timeIntervalSince($0.value.recordedAt) <= Self.maximumStaleTTL
+        }
+        self.lastGoodUsageItems = self.lastGoodUsageItems.compactMapValues { items in
+            let retained = items.filter {
+                now.timeIntervalSince($0.value.recordedAt) <= Self.maximumStaleTTL
+            }
+            return retained.isEmpty ? nil : retained
+        }
     }
 
     private func response(for key: String) -> CLILocalHTTPResponse? {
@@ -416,6 +427,10 @@ actor CLIServeResponseCache {
 
     func cachedEntryCount() -> Int {
         self.entries.count
+    }
+
+    func cachedStaleVariantCount() -> Int {
+        self.lastGood.count + self.lastGoodUsageItems.count
     }
 }
 
@@ -688,8 +703,8 @@ extension CodexBarCLI {
     /// ceiling. Zero (stale fallback disabled) when response caching is disabled.
     static func serveStaleTTL(refreshInterval: TimeInterval) -> TimeInterval {
         guard refreshInterval > 0 else { return 0 }
-        guard refreshInterval.isFinite else { return 3600 }
-        return min(max(refreshInterval * 10, 300), 3600)
+        guard refreshInterval.isFinite else { return CLIServeResponseCache.maximumStaleTTL }
+        return min(max(refreshInterval * 10, 300), CLIServeResponseCache.maximumStaleTTL)
     }
 
     static func serveCLISessionIdleWindow(refreshInterval: TimeInterval) -> TimeInterval {

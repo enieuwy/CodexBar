@@ -1,4 +1,3 @@
-import CodexBarCore
 import Commander
 import Foundation
 import Testing
@@ -1117,6 +1116,44 @@ struct CLIServeRouterTests {
         #expect(CodexBarCLI.serveStaleTTL(refreshInterval: 1800) == 3600)
         #expect(CodexBarCLI.serveStaleTTL(refreshInterval: 86401) == 3600)
         #expect(CodexBarCLI.serveStaleTTL(refreshInterval: .infinity) == 3600)
+    }
+
+    @Test
+    func `serve cache prunes stale variants from old configurations`() async {
+        let cache = CLIServeResponseCache()
+        let startedAt = Date(timeIntervalSince1970: 1000)
+        let policy = CLIServeResponseCache.CachePolicy(
+            ttl: 0,
+            staleTTL: CLIServeResponseCache.maximumStaleTTL)
+
+        _ = await cache.responseOrStartFetch(for: "config:old", now: startedAt)
+        _ = await cache.completeFetch(
+            Self.response(#"{"status":"ok"}"#),
+            for: "config:old",
+            policy: policy,
+            now: startedAt,
+            shouldCache: true)
+
+        _ = await cache.responseOrStartFetch(for: "usage:old", now: startedAt)
+        _ = await cache.completeFetch(
+            Self.response(
+                #"[{"provider":"codex","call":1}]"#,
+                usageCacheKeys: ["account-1"]),
+            for: "usage:old",
+            policy: policy,
+            now: startedAt,
+            shouldCache: true)
+        #expect(await cache.cachedStaleVariantCount() == 2)
+
+        let expiredAt = startedAt.addingTimeInterval(CLIServeResponseCache.maximumStaleTTL + 1)
+        _ = await cache.responseOrStartFetch(for: "config:new", now: expiredAt)
+        #expect(await cache.cachedStaleVariantCount() == 0)
+        _ = await cache.completeFetch(
+            Self.response(#"{"status":"ok"}"#),
+            for: "config:new",
+            policy: policy,
+            now: expiredAt,
+            shouldCache: false)
     }
 
     @Test
