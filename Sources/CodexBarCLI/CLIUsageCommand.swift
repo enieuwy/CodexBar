@@ -303,7 +303,7 @@ extension CodexBarCLI {
             selectedTokenAccountID: account?.id,
             tokenAccountTokenUpdater: tokenContext.tokenUpdater(for: account),
             providerManualTokenUpdater: tokenContext.manualTokenUpdater(),
-            persistsCLISessions: command.persistCLISessions,
+            persistsCLISessions: Self.persistsCLISessions(provider: provider, command: command),
             persistentCLISessionIdleWindow: command.persistentCLISessionIdleWindow)
         let outcome = await Self.fetchProviderUsage(
             provider: provider,
@@ -406,6 +406,47 @@ extension CodexBarCLI {
             }
         }
 
+        return await Self.finishUsageOutput(output, provider: provider, command: command)
+    }
+
+    private static func holdsAntigravitySession(
+        provider: UsageProvider,
+        command: UsageCommandContext) -> Bool
+    {
+        self.holdsAntigravityCLISessionForPlanDebug(
+            provider: provider,
+            planDebugEnabled: command.antigravityPlanDebug,
+            jsonOnly: command.jsonOnly,
+            persistsCLISessions: command.persistCLISessions)
+    }
+
+    private static func persistsCLISessions(
+        provider: UsageProvider,
+        command: UsageCommandContext) -> Bool
+    {
+        command.persistCLISessions || self.holdsAntigravitySession(provider: provider, command: command)
+    }
+
+    static func holdsAntigravityCLISessionForPlanDebug(
+        provider: UsageProvider,
+        planDebugEnabled: Bool,
+        jsonOnly: Bool,
+        persistsCLISessions: Bool) -> Bool
+    {
+        provider == .antigravity
+            && planDebugEnabled
+            && !jsonOnly
+            && !persistsCLISessions
+    }
+
+    private static func finishUsageOutput(
+        _ output: UsageCommandOutput,
+        provider: UsageProvider,
+        command: UsageCommandContext) async -> UsageCommandOutput
+    {
+        if self.holdsAntigravitySession(provider: provider, command: command) {
+            await ProviderCLISessionLifecycle.shutdownPersistentSessions()
+        }
         return output
     }
 
