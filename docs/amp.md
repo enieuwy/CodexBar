@@ -8,8 +8,8 @@ read_when:
 
 # Amp Provider
 
-The Amp provider tracks Amp Free usage plus individual and workspace credits. It prefers the local Amp CLI and falls back to
-Amp's web usage endpoint with browser cookies.
+The Amp provider tracks Amp Free usage plus individual and workspace credits. It prefers the local Amp CLI, then an Amp
+access token, and finally browser cookies.
 
 ## Features
 
@@ -18,13 +18,18 @@ Amp's web usage endpoint with browser cookies.
 - **Individual credits**: Shows the remaining paid credit balance when Amp reports one.
 - **Workspace credits**: Shows each workspace's remaining paid credit balance separately.
 - **CLI-first fetch**: Uses `amp usage` when the Amp CLI is installed and signed in.
-- **Browser cookie fallback**: No separate API key is needed when the CLI is unavailable.
+- **Access token support**: Uses `AMP_API_KEY` or the access token saved in CodexBar settings.
+- **Browser cookie fallback**: Reads the legacy settings-page payload when the CLI and access token are unavailable.
 
 ## Setup
 
 1. Open **Settings → Providers**
 2. Enable **Amp**
-3. Install and sign in to the Amp CLI, or leave **Cookie source** on **Auto** for web fallback
+3. Install and sign in to the Amp CLI, add an Amp access token, or leave **Cookie source** on **Auto** for web fallback
+
+### Access token (optional)
+
+Create an access token in Amp settings, then paste it into **Amp → Access token** or set `AMP_API_KEY`.
 
 ### Manual cookie import (optional)
 
@@ -35,10 +40,14 @@ Amp's web usage endpoint with browser cookies.
 ## How it works
 
 - Runs `amp usage` first in automatic mode
-- Falls back to `POST https://ampcode.com/api/internal?userDisplayBalanceInfo`
+- Calls `POST https://ampcode.com/api/internal?userDisplayBalanceInfo` with an Amp access token
+- Falls back to the settings page with browser cookies
 - Parses the same usage display format returned to the CLI
-- Retains the old settings-page payload parser for older Amp deployments
 - Computes time-to-full from the hourly replenishment rate
+
+### “Amp access token is invalid or expired”
+
+Create a new access token in Amp settings, update `AMP_API_KEY` or CodexBar settings, then refresh.
 
 ## Troubleshooting
 

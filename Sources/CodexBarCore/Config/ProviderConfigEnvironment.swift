@@ -76,6 +76,8 @@ public enum ProviderConfigEnvironment {
 
     private static func directAPIKeyEnvironmentKey(for provider: UsageProvider) -> String? {
         switch provider {
+        case .amp:
+            AmpSettingsReader.apiTokenKey
         case .openai:
             OpenAIAPISettingsReader.adminAPIKeyEnvironmentKey
         case .azureopenai:

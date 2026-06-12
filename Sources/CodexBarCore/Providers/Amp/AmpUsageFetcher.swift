@@ -10,6 +10,8 @@ import SweetCookieKit
 public enum AmpUsageError: LocalizedError, Sendable {
     case notLoggedIn
     case invalidCredentials
+    case missingAPIToken
+    case invalidAPIToken
     case parseFailed(String)
     case networkError(String)
     case noSessionCookie
@@ -20,6 +22,10 @@ public enum AmpUsageError: LocalizedError, Sendable {
             "Not logged in to Amp. Please log in via ampcode.com."
         case .invalidCredentials:
             "Amp session cookie expired. Please log in again."
+        case .missingAPIToken:
+            "Amp access token not configured. Set AMP_API_KEY or add it in Settings."
+        case .invalidAPIToken:
+            "Amp access token is invalid or expired."
         case let .parseFailed(message):
             "Could not parse Amp usage: \(message)"
         case let .networkError(message):
@@ -119,12 +125,11 @@ public struct AmpUsageFetcher: Sendable {
             }
             let diagnostics = RedirectDiagnostics(cookieHeader: cookieHeader, logger: logger)
             do {
-                let (snapshot, responseInfo) = try await self.fetchWithDiagnostics(
+                let (html, responseInfo) = try await self.fetchLegacyHTMLWithDiagnostics(
                     cookieHeader: cookieHeader,
-                    diagnostics: diagnostics,
-                    now: now)
+                    diagnostics: diagnostics)
                 self.logDiagnostics(responseInfo: responseInfo, diagnostics: diagnostics, logger: logger)
-                return snapshot
+                return try AmpUsageParser.parse(html: html, now: now)
             } catch {
                 self.logDiagnostics(responseInfo: nil, diagnostics: diagnostics, logger: logger)
                 logger("[amp] Fetch failed: \(error.localizedDescription)")
@@ -133,11 +138,28 @@ public struct AmpUsageFetcher: Sendable {
         }
 
         let diagnostics = RedirectDiagnostics(cookieHeader: cookieHeader, logger: nil)
-        let (snapshot, _) = try await self.fetchWithDiagnostics(
+        let (html, _) = try await self.fetchLegacyHTMLWithDiagnostics(
             cookieHeader: cookieHeader,
-            diagnostics: diagnostics,
-            now: now)
-        return snapshot
+            diagnostics: diagnostics)
+        return try AmpUsageParser.parse(html: html, now: now)
+    }
+
+    public func fetch(
+        apiToken: String,
+        logger: ((String) -> Void)? = nil,
+        now: Date = Date()) async throws -> AmpUsageSnapshot
+    {
+        guard let token = AmpSettingsReader.cleaned(apiToken) else {
+            throw AmpUsageError.missingAPIToken
+        }
+        let request = try Self.makeUsageAPIRequest(apiToken: token)
+        let diagnostics = APIRedirectDiagnostics(logger: logger)
+        let session = URLSession(configuration: .ephemeral, delegate: diagnostics, delegateQueue: nil)
+        let httpResponse = try await session.response(for: request)
+        logger?("[amp] API response: \(httpResponse.statusCode) " +
+            "\(httpResponse.response.url?.absoluteString ?? "unknown")")
+        try Self.validateAPIResponse(httpResponse)
+        return try Self.parseUsageAPIResponse(httpResponse.data, now: now)
     }
 
     public func debugRawProbe(cookieHeaderOverride: String? = nil) async -> String {
@@ -154,9 +176,10 @@ public struct AmpUsageFetcher: Sendable {
             let cookieNames = CookieHeaderNormalizer.pairs(from: cookieHeader).map(\.name)
             lines.append("Cookie names: \(cookieNames.joined(separator: ", "))")
 
-            let (snapshot, responseInfo) = try await self.fetchWithDiagnostics(
+            let (html, responseInfo) = try await self.fetchLegacyHTMLWithDiagnostics(
                 cookieHeader: cookieHeader,
                 diagnostics: diagnostics)
+            let snapshot = try AmpUsageParser.parse(html: html)
 
             lines.append("")
             lines.append("Fetch Success")
@@ -220,51 +243,17 @@ public struct AmpUsageFetcher: Sendable {
         #endif
     }
 
-    private func fetchWithDiagnostics(
-        cookieHeader: String,
-        diagnostics: RedirectDiagnostics,
-        now: Date = Date()) async throws -> (AmpUsageSnapshot, ResponseInfo)
-    {
-        do {
-            return try await self.fetchUsageAPIWithDiagnostics(
-                cookieHeader: cookieHeader,
-                diagnostics: diagnostics,
-                now: now)
-        } catch {
-            if diagnostics.detectedLoginRedirect {
-                throw AmpUsageError.invalidCredentials
-            }
-            guard Self.shouldTryLegacyFallback(after: error) else { throw error }
-            let (html, responseInfo) = try await self.fetchLegacyHTMLWithDiagnostics(
-                cookieHeader: cookieHeader,
-                diagnostics: diagnostics)
-            return try (AmpUsageParser.parse(html: html, now: now), responseInfo)
-        }
-    }
-
-    private func fetchUsageAPIWithDiagnostics(
-        cookieHeader: String,
-        diagnostics: RedirectDiagnostics,
-        now: Date) async throws -> (AmpUsageSnapshot, ResponseInfo)
-    {
+    static func makeUsageAPIRequest(apiToken: String) throws -> URLRequest {
         var request = URLRequest(url: Self.usageURL)
         request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "method": "userDisplayBalanceInfo",
             "params": [:],
         ])
-        request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "accept")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        self.applyBrowserHeaders(to: &request)
-
-        let session = URLSession(configuration: .ephemeral, delegate: diagnostics, delegateQueue: nil)
-        let httpResponse = try await session.response(for: request)
-        let responseInfo = ResponseInfo(
-            statusCode: httpResponse.statusCode,
-            url: httpResponse.response.url?.absoluteString ?? "unknown")
-        try self.validate(response: httpResponse, diagnostics: diagnostics)
-        return try (Self.parseUsageAPIResponse(httpResponse.data, now: now), responseInfo)
+        return request
     }
 
     private func fetchLegacyHTMLWithDiagnostics(
@@ -277,14 +266,14 @@ public struct AmpUsageFetcher: Sendable {
         request.setValue(
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             forHTTPHeaderField: "accept")
-        self.applyBrowserHeaders(to: &request)
+        Self.applyBrowserHeaders(to: &request)
 
         let session = URLSession(configuration: .ephemeral, delegate: diagnostics, delegateQueue: nil)
         let httpResponse = try await session.response(for: request)
         let responseInfo = ResponseInfo(
             statusCode: httpResponse.statusCode,
             url: httpResponse.response.url?.absoluteString ?? "unknown")
-        try self.validate(response: httpResponse, diagnostics: diagnostics)
+        try Self.validateBrowserResponse(response: httpResponse, diagnostics: diagnostics)
 
         let html = String(data: httpResponse.data, encoding: .utf8) ?? ""
         return (html, responseInfo)
@@ -300,7 +289,7 @@ public struct AmpUsageFetcher: Sendable {
 
         guard response.ok else {
             if response.error?.code == "auth-required" {
-                throw AmpUsageError.invalidCredentials
+                throw AmpUsageError.invalidAPIToken
             }
             throw AmpUsageError.networkError(response.error?.message ?? "Amp usage API returned an error.")
         }
@@ -310,36 +299,32 @@ public struct AmpUsageFetcher: Sendable {
         return try AmpUsageParser.parse(displayText: displayText, now: now)
     }
 
-    static func shouldTryLegacyFallback(after error: Error) -> Bool {
-        if error is CancellationError || (error as? URLError)?.code == .cancelled {
-            return false
-        }
-        guard let ampError = error as? AmpUsageError else { return true }
-        switch ampError {
-        case .networkError, .parseFailed:
-            return true
-        case .notLoggedIn, .invalidCredentials, .noSessionCookie:
-            return false
-        }
-    }
-
-    private func applyBrowserHeaders(to request: inout URLRequest) {
+    private static func applyBrowserHeaders(to request: inout URLRequest) {
         request.setValue(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
             forHTTPHeaderField: "user-agent")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "accept-language")
         request.setValue("https://ampcode.com", forHTTPHeaderField: "origin")
-        request.setValue(Self.settingsURL.absoluteString, forHTTPHeaderField: "referer")
+        request.setValue(self.settingsURL.absoluteString, forHTTPHeaderField: "referer")
     }
 
-    private func validate(
+    private static func validateBrowserResponse(
         response: ProviderHTTPResponse,
         diagnostics: RedirectDiagnostics) throws
     {
         guard response.statusCode == 200 else {
             if response.statusCode == 401 || response.statusCode == 403 || diagnostics.detectedLoginRedirect {
                 throw AmpUsageError.invalidCredentials
+            }
+            throw AmpUsageError.networkError("HTTP \(response.statusCode)")
+        }
+    }
+
+    private static func validateAPIResponse(_ response: ProviderHTTPResponse) throws {
+        guard response.statusCode == 200 else {
+            if response.statusCode == 401 || response.statusCode == 403 {
+                throw AmpUsageError.invalidAPIToken
             }
             throw AmpUsageError.networkError("HTTP \(response.statusCode)")
         }
@@ -394,6 +379,28 @@ public struct AmpUsageFetcher: Sendable {
                 logger("[amp] Redirect \(response.statusCode) \(from) -> \(to)")
             }
             completionHandler(updated)
+        }
+    }
+
+    /// Amp's balance RPC should not redirect. Refusing redirects guarantees the bearer token cannot cross hosts.
+    private final class APIRedirectDiagnostics: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        private let logger: ((String) -> Void)?
+
+        init(logger: ((String) -> Void)?) {
+            self.logger = logger
+        }
+
+        func urlSession(
+            _: URLSession,
+            task _: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void)
+        {
+            let from = response.url?.absoluteString ?? "unknown"
+            let to = request.url?.absoluteString ?? "unknown"
+            self.logger?("[amp] API redirect blocked: \(response.statusCode) \(from) -> \(to)")
+            completionHandler(nil)
         }
     }
 

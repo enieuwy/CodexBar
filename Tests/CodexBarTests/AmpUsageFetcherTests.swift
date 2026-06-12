@@ -3,7 +3,10 @@ import Testing
 @testable import CodexBarCore
 
 struct AmpUsageFetcherTests {
-    private func makeContext(sourceMode: ProviderSourceMode) -> ProviderFetchContext {
+    private func makeContext(
+        sourceMode: ProviderSourceMode,
+        env: [String: String] = [:]) -> ProviderFetchContext
+    {
         let browserDetection = BrowserDetection(cacheTTL: 0)
         return ProviderFetchContext(
             runtime: .app,
@@ -12,7 +15,7 @@ struct AmpUsageFetcherTests {
             webTimeout: 1,
             webDebugDumpHTML: false,
             verbose: false,
-            env: [:],
+            env: env,
             settings: nil,
             fetcher: UsageFetcher(),
             claudeFetcher: ClaudeUsageFetcher(browserDetection: browserDetection),
@@ -67,12 +70,33 @@ struct AmpUsageFetcherTests {
     }
 
     @Test
-    func `api cancellation does not fall back to legacy scraper`() {
-        #expect(!AmpUsageFetcher.shouldTryLegacyFallback(after: CancellationError()))
-        #expect(!AmpUsageFetcher.shouldTryLegacyFallback(after: URLError(.cancelled)))
-        #expect(AmpUsageFetcher.shouldTryLegacyFallback(after: URLError(.timedOut)))
-        #expect(AmpUsageFetcher.shouldTryLegacyFallback(after: AmpUsageError.parseFailed("missing")))
-        #expect(!AmpUsageFetcher.shouldTryLegacyFallback(after: AmpUsageError.invalidCredentials))
+    func `api request uses bearer token without cookies`() throws {
+        let request = try AmpUsageFetcher.makeUsageAPIRequest(apiToken: "sgamp_test")
+
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sgamp_test")
+        #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+    }
+
+    @Test
+    func `api strategy falls back only from auto mode and preserves cancellation`() {
+        let strategy = AmpAPIFetchStrategy()
+        let auto = self.makeContext(sourceMode: .auto)
+
+        #expect(strategy.shouldFallback(on: AmpUsageError.missingAPIToken, context: auto))
+        #expect(strategy.shouldFallback(on: AmpUsageError.invalidAPIToken, context: auto))
+        #expect(strategy.shouldFallback(on: URLError(.timedOut), context: auto))
+        #expect(!strategy.shouldFallback(on: CancellationError(), context: auto))
+        #expect(!strategy.shouldFallback(on: URLError(.cancelled), context: auto))
+        #expect(!strategy.shouldFallback(
+            on: AmpUsageError.invalidAPIToken,
+            context: self.makeContext(sourceMode: .api)))
+    }
+
+    @Test
+    func `amp config token resolves through environment`() {
+        let env = [AmpSettingsReader.apiTokenKey: " 'sgamp_test' "]
+
+        #expect(ProviderTokenResolver.ampToken(environment: env) == "sgamp_test")
     }
 
     @Test

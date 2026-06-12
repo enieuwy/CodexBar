@@ -3,6 +3,18 @@ import Testing
 
 struct ProviderConfigEnvironmentTests {
     @Test
+    func `applies API key override for amp`() {
+        let config = ProviderConfig(id: .amp, apiKey: "sgamp-config")
+        let env = ProviderConfigEnvironment.applyAPIKeyOverride(
+            base: [:],
+            provider: .amp,
+            config: config)
+
+        #expect(env[AmpSettingsReader.apiTokenKey] == "sgamp-config")
+        #expect(ProviderTokenResolver.ampToken(environment: env) == "sgamp-config")
+    }
+
+    @Test
     func `applies API key override for zai`() {
         let config = ProviderConfig(id: .zai, apiKey: "z-token")
         let env = ProviderConfigEnvironment.applyAPIKeyOverride(

@@ -32,7 +32,7 @@ public enum AmpProviderDescriptor {
                 supportsTokenCost: false,
                 noDataMessage: { "Amp cost summary is not supported." }),
             fetchPlan: ProviderFetchPlan(
-                sourceModes: [.auto, .web, .cli],
+                sourceModes: [.auto, .api, .web, .cli],
                 pipeline: ProviderFetchPipeline(resolveStrategies: self.resolveStrategies)),
             cli: ProviderCLIConfig(
                 name: "amp",
@@ -42,12 +42,14 @@ public enum AmpProviderDescriptor {
     private static func resolveStrategies(context: ProviderFetchContext) async -> [any ProviderFetchStrategy] {
         switch context.sourceMode {
         case .auto:
-            [AmpCLIFetchStrategy(), AmpStatusFetchStrategy()]
+            [AmpCLIFetchStrategy(), AmpAPIFetchStrategy(), AmpStatusFetchStrategy()]
         case .cli:
             [AmpCLIFetchStrategy()]
+        case .api:
+            [AmpAPIFetchStrategy()]
         case .web:
             [AmpStatusFetchStrategy()]
-        case .api, .oauth:
+        case .oauth:
             []
         }
     }
@@ -75,6 +77,35 @@ struct AmpCLIFetchStrategy: ProviderFetchStrategy {
             return false
         }
         return context.sourceMode == .auto
+    }
+}
+
+struct AmpAPIFetchStrategy: ProviderFetchStrategy {
+    let id: String = "amp.api"
+    let kind: ProviderFetchKind = .apiToken
+
+    func isAvailable(_ context: ProviderFetchContext) async -> Bool {
+        _ = context
+        return true
+    }
+
+    func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
+        guard let token = ProviderTokenResolver.ampToken(environment: context.env) else {
+            throw AmpUsageError.missingAPIToken
+        }
+        let logger: ((String) -> Void)? = context.verbose
+            ? { msg in CodexBarLog.logger(LogCategories.amp).verbose(msg) }
+            : nil
+        let snapshot = try await AmpUsageFetcher(browserDetection: context.browserDetection)
+            .fetch(apiToken: token, logger: logger)
+        return self.makeResult(
+            usage: snapshot.toUsageSnapshot(now: snapshot.updatedAt),
+            sourceLabel: "api")
+    }
+
+    func shouldFallback(on error: Error, context: ProviderFetchContext) -> Bool {
+        guard context.sourceMode == .auto else { return false }
+        return !(error is CancellationError) && (error as? URLError)?.code != .cancelled
     }
 }
 

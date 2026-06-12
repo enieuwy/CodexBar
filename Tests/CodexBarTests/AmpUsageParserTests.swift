@@ -148,13 +148,13 @@ struct AmpUsageParserTests {
     }
 
     @Test
-    func `usage api auth error is invalid credentials`() {
+    func `usage api auth error is invalid API token`() {
         let data = Data(#"{"ok":false,"error":{"code":"auth-required","message":"Sign in"}}"#.utf8)
 
         #expect {
             try AmpUsageFetcher.parseUsageAPIResponse(data)
         } throws: { error in
-            guard case AmpUsageError.invalidCredentials = error else { return false }
+            guard case AmpUsageError.invalidAPIToken = error else { return false }
             return true
         }
     }
