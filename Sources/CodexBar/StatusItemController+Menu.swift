@@ -715,7 +715,9 @@ extension StatusItemController {
                 _ = self.addCostHistorySubmenu(to: menu, provider: currentProvider)
             }
         }
-        menu.addItem(.separator())
+        if menu.items.last?.isSeparatorItem != true {
+            menu.addItem(.separator())
+        }
     }
 
     func addPrimaryMenuContent(
@@ -1206,6 +1208,10 @@ extension StatusItemController {
         let sectionSpacing = CGFloat(6)
         let usageBottomPadding = bottomPadding
         let creditsBottomPadding = bottomPadding
+        func addSectionSeparator() {
+            guard menu.items.last?.isSeparatorItem != true else { return }
+            menu.addItem(.separator())
+        }
 
         if hasUsageBlock {
             let usageView = UsageMenuCardHeaderAndUsageSectionView(
@@ -1241,18 +1247,18 @@ extension StatusItemController {
         }
 
         if hasStorage || hasCredits || hasExtraUsage || hasCost {
-            menu.addItem(.separator())
+            addSectionSeparator()
         }
 
         if self.addStorageMenuCardSection(to: menu, provider: provider, width: width),
-           hasCredits || hasExtraUsage || hasCost
+           hasCredits || hasExtraUsage
         {
-            menu.addItem(.separator())
+            addSectionSeparator()
         }
 
         if hasCredits {
             if hasExtraUsage || hasCost {
-                menu.addItem(.separator())
+                addSectionSeparator()
             }
             let creditsView = UsageMenuCardCreditsSectionView(
                 model: model,
@@ -1274,7 +1280,7 @@ extension StatusItemController {
         }
         if hasExtraUsage {
             if hasCredits {
-                menu.addItem(.separator())
+                addSectionSeparator()
             }
             let extraUsageSubmenu = self.makeOpenAIAPIUsageSubmenu(provider: provider, width: width)
             let extraUsageView = UsageMenuCardExtraUsageSectionView(
@@ -1292,7 +1298,7 @@ extension StatusItemController {
         }
         if hasCost {
             if hasCredits || hasExtraUsage {
-                menu.addItem(.separator())
+                addSectionSeparator()
             }
             let costSubmenu = webItems.hasCostHistory ? self
                 .makeCostHistorySubmenu(provider: provider, width: width) : nil
@@ -1306,19 +1312,18 @@ extension StatusItemController {
     @discardableResult
     func addStorageMenuCardSection(to menu: NSMenu, provider: UsageProvider, width: CGFloat) -> Bool {
         guard let storageText = self.store.storageFootprintText(for: provider) else { return false }
-        let storageView = StorageMenuCardSectionView(
-            storageText: storageText,
-            topPadding: 6,
-            bottomPadding: 6,
-            width: width)
         let storageSubmenu = self.makeStorageBreakdownSubmenu(provider: provider, width: width)
-        menu.addItem(self.makeMenuCardItem(
-            storageView,
-            id: "menuCardStorage",
-            width: width,
-            heightCacheScope: provider.rawValue,
-            heightCacheFingerprint: UsageMenuCardView.Model.heightFingerprintField("storage", storageText),
-            submenu: storageSubmenu))
+        let menuFont = NSFont.menuFont(ofSize: 0)
+        let title = NSMutableAttributedString(string: L("Storage"), attributes: [.font: menuFont])
+        title.append(NSAttributedString(
+            string: "  \(storageText)",
+            attributes: [.font: menuFont, .foregroundColor: NSColor.secondaryLabelColor]))
+        let item = NSMenuItem(title: L("Storage"), action: nil, keyEquivalent: "")
+        item.attributedTitle = title
+        item.isEnabled = storageSubmenu != nil
+        item.representedObject = "menuCardStorage"
+        item.submenu = storageSubmenu
+        menu.addItem(item)
         return true
     }
 

@@ -41,7 +41,7 @@ extension StatusItemController {
         let visibleDetailLines = Self.costMenuVisibleDetailLines(
             tokenUsage: model.tokenUsage,
             hasSubmenu: submenu != nil)
-        guard self.menuCardRenderingEnabledForController else {
+        guard visibleDetailLines.isEmpty == false, self.menuCardRenderingEnabledForController else {
             return Self.makeNativeCostMenuCardItem(
                 visibleDetailLines: visibleDetailLines,
                 tooltipLines: tooltipLines,

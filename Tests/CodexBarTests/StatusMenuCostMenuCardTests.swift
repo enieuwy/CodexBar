@@ -95,11 +95,11 @@ struct StatusMenuCostMenuCardTests {
             errorLine: nil,
             errorCopyText: nil)
         let model = self.makeModel(tokenUsage: tokenUsage)
-        let submenu = NSMenu()
 
+        // No history submenu — detail lines are visible and must be clipped to the row width.
         let item = controller.makeCostMenuCardItem(
             model: model,
-            submenu: submenu,
+            submenu: nil,
             width: width)
         let view = try #require(item.view)
 
@@ -107,9 +107,7 @@ struct StatusMenuCostMenuCardTests {
         #expect(abs(view.frame.width - width) <= 0.5)
         #expect(item.title == "Cost")
         #expect(item.toolTip?.contains("$52,431.09") == true)
-        #expect(item.submenu === submenu)
-        #expect(item.target === controller)
-        #expect(item.action.map(NSStringFromSelector) == "menuCardNoOp:")
+        #expect(item.submenu == nil)
     }
 
     private func makeSettings() -> SettingsStore {
