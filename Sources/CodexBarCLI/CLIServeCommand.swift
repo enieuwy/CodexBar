@@ -61,7 +61,7 @@ private struct ServeErrorPayload: Encodable {
     let error: String
 }
 
-struct ServeHealthPayload: Encodable {
+private struct ServeHealthPayload: Encodable {
     let status: String
     let version: String?
 
