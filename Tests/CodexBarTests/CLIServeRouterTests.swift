@@ -222,6 +222,52 @@ struct CLIServeRouterTests {
     }
 
     @Test
+    func `serve provider timeout stays below the request deadline`() {
+        #expect(abs(CodexBarCLI.serveProviderTimeout(requestTimeout: 30) - 24) < 1e-9)
+        #expect(abs(CodexBarCLI.serveProviderTimeout(requestTimeout: 10) - 8) < 1e-9)
+        // Outer deadline disabled (0) or non-finite: still bound each provider.
+        #expect(CodexBarCLI.serveProviderTimeout(requestTimeout: 0) == 25)
+        #expect(CodexBarCLI.serveProviderTimeout(requestTimeout: .infinity) == 25)
+        // Finite deadlines stay strictly below the request timeout at every
+        // value, including sub-second ones.
+        #expect(CodexBarCLI.serveProviderTimeout(requestTimeout: 1) < 1)
+        #expect(abs(CodexBarCLI.serveProviderTimeout(requestTimeout: 0.5) - 0.4) < 1e-9)
+    }
+
+    @Test
+    func `serve usage collection bounds a hung provider without blocking others`() async {
+        let providers: [UsageProvider] = [.codex, .claude, .gemini]
+        let start = Date()
+        let output = await CodexBarCLI.serveCollectUsageOutputs(
+            providers: providers,
+            providerTimeout: 0.1)
+        { provider in
+            if provider == .claude {
+                try? await Task.sleep(for: .seconds(30))
+                return UsageCommandOutput(sections: ["late:\(provider.rawValue)"])
+            }
+            return UsageCommandOutput(sections: ["ok:\(provider.rawValue)"])
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        // The hung provider must not serialize or stall the others.
+        #expect(elapsed < 5)
+        // Fast providers render in caller order; the hung one yields no section.
+        #expect(output.sections == ["ok:codex", "ok:gemini"])
+        // The hung provider degrades to a single provider error row.
+        #expect(output.payload.count == 1)
+        #expect(output.payload.first?.provider == UsageProvider.claude.rawValue)
+        #expect(output.payload.first?.error != nil)
+        #expect(output.payload.first?.error?.kind == .provider)
+        // The timeout row is account-agnostic: it carries no cache key, so the
+        // cache's keyed last-good merge intentionally does not reconstruct it
+        // (a timeout cannot prove which account is active).
+        #expect(output.payload.first?.cacheAccountKey == nil)
+        #expect(output.payload.first?.account == nil)
+        #expect(output.exitCode == .failure)
+    }
+
+    @Test
     func `serve cache uses stable Codex account identities`() {
         let storedID = UUID()
         let firstProjection = Self.codexVisibleAccount(

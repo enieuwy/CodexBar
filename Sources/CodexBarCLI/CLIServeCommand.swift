@@ -419,6 +419,14 @@ private enum CLIServeArgumentError: LocalizedError {
     }
 }
 
+private struct CLIServeProviderTimeoutError: LocalizedError {
+    let provider: UsageProvider
+
+    var errorDescription: String? {
+        "\(self.provider.rawValue) usage timed out"
+    }
+}
+
 extension CodexBarCLI {
     static let defaultServeRequestTimeout: TimeInterval = 30
 
@@ -561,7 +569,8 @@ extension CodexBarCLI {
                 await Self.serveUsage(
                     provider: provider,
                     config: snapshot.config,
-                    refreshInterval: runtime.refreshInterval)
+                    refreshInterval: runtime.refreshInterval,
+                    requestTimeout: runtime.requestTimeout)
             }
         case let .cost(provider):
             let snapshot: CLIServeConfigSnapshot
@@ -691,7 +700,8 @@ extension CodexBarCLI {
     private static func serveUsage(
         provider rawProvider: String?,
         config: CodexBarConfig,
-        refreshInterval: TimeInterval) async -> CLILocalHTTPResponse
+        refreshInterval: TimeInterval,
+        requestTimeout: TimeInterval) async -> CLILocalHTTPResponse
     {
         let selection: ProviderSelection
         do {
@@ -710,6 +720,12 @@ extension CodexBarCLI {
             return Self.serveError(status: .internalServerError, message: error.localizedDescription)
         }
 
+        // Bound each provider strictly below the outer request deadline so a
+        // single slow/hung provider degrades to its own error row while every
+        // other provider still returns fresh data, instead of stalling the whole
+        // response and being discarded by the deadline's empty 504.
+        let providerTimeout = Self.serveProviderTimeout(requestTimeout: requestTimeout)
+
         let browserDetection = BrowserDetection()
         let command = UsageCommandContext(
             format: .json,
@@ -718,7 +734,7 @@ extension CodexBarCLI {
             antigravityPlanDebug: false,
             augmentDebug: false,
             webDebugDumpHTML: false,
-            webTimeout: 60,
+            webTimeout: providerTimeout,
             verbose: false,
             useColor: false,
             resetStyle: Self.resetTimeDisplayStyleFromDefaults(),
@@ -731,21 +747,93 @@ extension CodexBarCLI {
             persistCLISessions: true,
             persistentCLISessionIdleWindow: Self.serveCLISessionIdleWindow(refreshInterval: refreshInterval))
 
-        var output = UsageCommandOutput()
-        for provider in selection.asList {
-            let providerOutput = await ProviderInteractionContext.$current.withValue(.background) {
+        let output = await Self.serveCollectUsageOutputs(
+            providers: selection.asList,
+            providerTimeout: providerTimeout)
+        { provider in
+            await ProviderInteractionContext.$current.withValue(.background) {
                 await Self.fetchUsageOutputs(
                     provider: provider,
                     status: nil,
                     tokenContext: tokenContext,
                     command: command)
             }
-            output.merge(providerOutput)
         }
 
         return Self.serveJSON(
             output.payload,
             usageCacheKeys: output.payload.map(\.cacheAccountKey))
+    }
+
+    /// Per-provider fetch budget for `/usage`. Each provider is bounded strictly
+    /// below the outer request deadline so the deadline (which yields an empty
+    /// 504 and discards every collected provider) stays a last resort, never the
+    /// primary cutoff. When the outer deadline is disabled (`requestTimeout == 0`)
+    /// each provider is still bounded so `/usage` cannot hang indefinitely.
+    static func serveProviderTimeout(requestTimeout: TimeInterval) -> TimeInterval {
+        let disabledDeadlineBudget: TimeInterval = 25
+        guard requestTimeout > 0, requestTimeout.isFinite else { return disabledDeadlineBudget }
+        // 0.8x keeps the budget strictly below the finite deadline at every
+        // value (including sub-second timeouts), so the empty-504 deadline can
+        // never preempt a provider's own bound.
+        return requestTimeout * 0.8
+    }
+
+    /// Collects usage for each provider concurrently, bounding every provider by
+    /// `providerTimeout`. A provider that exceeds its budget contributes a
+    /// provider error row instead of blocking the others, so the overall response
+    /// still renders every healthy provider. (Per-account error rows that carry a
+    /// cache key are merged with last-known-good by `CLIServeResponseCache`; a
+    /// timeout row is account-agnostic and is not reconstructed, matching the
+    /// existing "a timeout cannot prove the active account" cache rule.) Each
+    /// provider's timeout clock starts when its task is spawned, so a hung
+    /// provider cannot serialize the others' deadlines; results are merged in the
+    /// caller's provider order regardless of completion order.
+    static func serveCollectUsageOutputs(
+        providers: [UsageProvider],
+        providerTimeout: TimeInterval,
+        fetch: @Sendable @escaping (UsageProvider) async -> UsageCommandOutput) async -> UsageCommandOutput
+    {
+        let grace = Duration.seconds(max(0, providerTimeout))
+        let indexed = await withTaskGroup(of: (Int, UsageCommandOutput).self) { group in
+            for (index, provider) in providers.enumerated() {
+                group.addTask {
+                    let task = Task<UsageCommandOutput, Error> { await fetch(provider) }
+                    let join = BoundedTaskJoin(sourceTask: task)
+                    switch await join.value(joinGrace: grace) {
+                    case let .value(output):
+                        return (index, output)
+                    case .failure, .timedOut:
+                        return (index, Self.serveProviderTimeoutOutput(provider: provider))
+                    }
+                }
+            }
+            var collected: [(Int, UsageCommandOutput)] = []
+            for await item in group {
+                collected.append(item)
+            }
+            return collected
+        }
+
+        var output = UsageCommandOutput()
+        for (_, providerOutput) in indexed.sorted(by: { $0.0 < $1.0 }) {
+            output.merge(providerOutput)
+        }
+        return output
+    }
+
+    /// Provider-level error row for a fetch that exceeded its per-provider budget.
+    static func serveProviderTimeoutOutput(provider: UsageProvider) -> UsageCommandOutput {
+        var output = UsageCommandOutput()
+        output.exitCode = .failure
+        output.payload.append(Self.makeProviderErrorPayload(
+            provider: provider,
+            account: nil,
+            source: "auto",
+            status: nil,
+            error: CLIServeProviderTimeoutError(provider: provider),
+            kind: .provider))
+        return output
     }
 
     private static func serveCost(provider rawProvider: String?, config: CodexBarConfig) async -> CLILocalHTTPResponse {

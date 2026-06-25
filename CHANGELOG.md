@@ -7,6 +7,7 @@
 
 ### Fixed
 - Mistral: restore Vibe monthly-plan usage by forwarding only required console session cookies. Thanks @lfmundim!
+- CLI server: collect providers concurrently with a per-provider timeout when serving `/usage` so one slow or hung provider degrades to its own error row while the others still return fresh data, instead of stalling the whole response into an empty timeout. Thanks @enieuwy!
 
 ## 0.37.3 — 2026-06-23
 
