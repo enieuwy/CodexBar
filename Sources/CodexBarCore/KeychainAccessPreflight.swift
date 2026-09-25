@@ -362,6 +362,20 @@ public enum KeychainAccessPreflight {
               !acls.isEmpty
         else { return .indeterminate }
 
+        let applications = self.evaluateTrustedApplicationACLs(acls, copyACLContents: copyACLContents)
+        // An application rejection is already conclusive; otherwise securityd also enforces the partition list.
+        guard applications != .rejected else { return .rejected }
+        let partitions = self.evaluatePartitionACLs(
+            access: access,
+            copyMatchingACLs: copyMatchingACLs,
+            copyACLContents: copyACLContents)
+        return self.combineDecryptACLEvaluations(applications: applications, partitions: partitions)
+    }
+
+    private static func evaluateTrustedApplicationACLs(
+        _ acls: [SecACL],
+        copyACLContents: SecACLCopyContentsFunction) -> DecryptACLEvaluation
+    {
         let currentPaths = KeychainCacheStore.invokingApplicationPathsForCacheAccess()
         guard !currentPaths.isEmpty else { return .indeterminate }
 
@@ -405,6 +419,121 @@ public enum KeychainAccessPreflight {
             }
         }
         return inspectionIncomplete ? .indeterminate : .rejected
+    }
+
+    /// securityd separately checks the item's partition list (macOS 10.12+) against the caller's partition ID.
+    /// A mismatch shows a password prompt even for no-UI queries and even when the trusted-application list admits
+    /// the caller, which is how CLI-owned items lose CodexBar's access after their owner rewrites the partitions.
+    private static func evaluatePartitionACLs(
+        access: SecAccess,
+        copyMatchingACLs: SecAccessCopyMatchingACLListFunction,
+        copyACLContents: SecACLCopyContentsFunction) -> DecryptACLEvaluation
+    {
+        // Items created before partition lists existed, or in keychains without them, carry no partition entry;
+        // the Security API returns no list for them and securityd applies no partition restriction.
+        guard let rawACLs = copyMatchingACLs(access, kSecACLAuthorizationPartitionID)?.takeRetainedValue(),
+              let acls = rawACLs as? [SecACL],
+              !acls.isEmpty
+        else { return .allowed }
+
+        var result = DecryptACLEvaluation.allowed
+        for acl in acls {
+            var applications: CFArray?
+            var description: CFString?
+            var selector = SecKeychainPromptSelector()
+            guard copyACLContents(acl, &applications, &description, &selector) == errSecSuccess,
+                  let description
+            else {
+                result = .indeterminate
+                continue
+            }
+            switch self.evaluatePartitionList(
+                partitionIDs: self.partitionIDs(fromACLDescription: description as String),
+                callerPartitionID: self.currentProcessPartitionID)
+            {
+            case .allowed:
+                continue
+            case .rejected:
+                return .rejected
+            case .indeterminate:
+                result = .indeterminate
+            }
+        }
+        return result
+    }
+
+    /// The caller's partition ID as securityd derives it: `teamid:` for team-signed code and `cdhash:` for ad-hoc
+    /// code. Other signatures (for example Apple platform binaries) are not CodexBar's and stay unknown.
+    private static let currentProcessPartitionID: String? = {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var information: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess,
+              let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode,
+              SecCodeCopySigningInformation(
+                  staticCode,
+                  SecCSFlags(rawValue: kSecCSSigningInformation),
+                  &information) == errSecSuccess,
+              let values = information as? [String: Any]
+        else { return nil }
+        return KeychainAccessPreflight.partitionID(signingInformation: values)
+    }()
+
+    static func partitionID(signingInformation values: [String: Any]) -> String? {
+        if let teamIdentifier = values[kSecCodeInfoTeamIdentifier as String] as? String, !teamIdentifier.isEmpty {
+            return "teamid:\(teamIdentifier)"
+        }
+        let flags = (values[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
+        guard flags & SecCodeSignatureFlags.adhoc.rawValue != 0,
+              let cdhash = values[kSecCodeInfoUnique as String] as? Data,
+              !cdhash.isEmpty
+        else { return nil }
+        return "cdhash:" + cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The partition ACL description is a hex-encoded property list: `{ Partitions = ("teamid:…", …) }`.
+    static func partitionIDs(fromACLDescription description: String) -> [String]? {
+        let hex = Array(description.utf8)
+        guard !hex.isEmpty, hex.count.isMultiple(of: 2) else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(hex.count / 2)
+        var index = 0
+        while index < hex.count {
+            guard let high = Self.hexValue(hex[index]), let low = Self.hexValue(hex[index + 1]) else { return nil }
+            bytes.append(high << 4 | low)
+            index += 2
+        }
+        guard let plist = try? PropertyListSerialization.propertyList(from: Data(bytes), format: nil),
+              let dictionary = plist as? [String: Any],
+              let partitions = dictionary["Partitions"] as? [String]
+        else { return nil }
+        return partitions
+    }
+
+    private static func hexValue(_ character: UInt8) -> UInt8? {
+        switch character {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): character - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): character - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): character - UInt8(ascii: "A") + 10
+        default: nil
+        }
+    }
+
+    static func evaluatePartitionList(partitionIDs: [String]?, callerPartitionID: String?) -> DecryptACLEvaluation {
+        // An unreadable list or an unknown caller identity cannot prove the read is prompt-free.
+        guard let partitionIDs, let callerPartitionID else { return .indeterminate }
+        return partitionIDs.contains(callerPartitionID) ? .allowed : .rejected
+    }
+
+    static func combineDecryptACLEvaluations(
+        applications: DecryptACLEvaluation,
+        partitions: DecryptACLEvaluation) -> DecryptACLEvaluation
+    {
+        if applications == .rejected || partitions == .rejected { return .rejected }
+        if applications == .indeterminate || partitions == .indeterminate { return .indeterminate }
+        return .allowed
     }
 
     private static let validationMemo = ValidationMemo()

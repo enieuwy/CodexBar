@@ -61,6 +61,12 @@ when CodexBar itself has not changed.
 The item's accessibility class controls when its data is available, such as after the first unlock. It does not grant
 a changed executable access and does not repair a code-signature ACL mismatch.
 
+macOS also stores a partition list on each item, such as `teamid:Y5PE65HELJ` for CodexBar or `apple-tool:` for
+`/usr/bin/security`. A caller missing from that list gets a password prompt even when the trusted-application list
+still names it and the query forbids UI. Some CLIs rewrite the list when they refresh their login, which removes the
+CodexBar entry that an earlier **Always Allow** added. The no-UI preflight therefore checks both lists and reports that
+access needs approval instead of starting a background read that would prompt.
+
 If a CodexBar-owned cache item's legacy ACL rejects the installed app, reads share a five-minute preflight cooldown.
 When fresh cache data becomes available, CodexBar can delete and recreate its own item using no-UI queries. A failed
 replacement is attempted at most once per cooldown; a failed retry starts another cooldown even if the old item is
