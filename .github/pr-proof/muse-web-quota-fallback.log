@@ -1,0 +1,59 @@
+# Muse Code web quota fallback — production-path proof
+# Date: 2026-09-26 03:22–03:39 AWST (UTC+8), macOS arm64, real Muse Code Everyday Usage account.
+# Redactions: device token, llama_dev_sess cookie value, email address, tier_id. Nothing else edited.
+#
+# Setup (no CodexBar Keychain read, no browser automation):
+#   - The dca: device token was read once with /usr/bin/security (user clicked Allow) into a
+#     temporary 0600 auth.json in the CLI's file format (storage "file"), selected with MUSE_AUTH_PATH.
+#   - The llama_dev_sess cookie was copied from the Firefox cookies.sqlite into a temporary
+#     CODEXBAR_CONFIG with cookieSource "manual". Both files were deleted after the run.
+#   - Brew build: codexbar 0.66.0 (/opt/homebrew/bin/codexbar).
+#   - Branch build: swift build of commit 74130071c (.build/debug/CodexBarCLI).
+
+## 1. The 5-hour window is idle (cookie only; 03:22:13)
+$ curl -H "Cookie: llama_dev_sess=<redacted>" -H "User-Agent: CodexBar" \
+    https://dev.meta.ai/api/portal/teams/<team>/subscription-quota
+{"subscription_quota":{"tier_id":"<id>","tier":"Muse Code Everyday Usage","as_of":1790364133,
+ "window_weighted_limit":"20000000000","window_duration_secs":18000,
+ "weekly_weighted_limit":"60000000000","weekly_resets_at":1790553600,
+ "window_weighted_used":"0","weekly_weighted_used":"13550839000"}}
+# No window_resets_at while idle. Weekly: 13550839000 / 60000000000 = 22.58%.
+# The Muse CLI `/usage` shows "Currently unavailable" in this state.
+
+## 2. Same account, same config, both builds (03:38:44)
+$ CODEXBAR_CONFIG=<tmp>/config.json MUSE_AUTH_PATH=<tmp>/auth.json codexbar usage --provider muse --format json
+== codexbar 0.66.0 (Brew)
+{
+ "source": "oauth",
+ "primary": null,
+ "secondary": null,
+ "dataConfidence": null,
+ "rows": [
+  {"label": "Plan", "value": "Muse Code Everyday Usage"},
+  {"label": "Quota", "value": "Not included in this login response"}
+ ],
+ "error": null
+}
+== branch 74130071c
+{
+ "source": "oauth+web",
+ "primary": {"windowMinutes": 300, "usedPercent": 0},
+ "secondary": {"windowMinutes": 10080, "usedPercent": 22.584731666666666, "resetsAt": "2026-09-28T00:00:00Z"},
+ "dataConfidence": "exact",
+ "rows": [
+  {"label": "Plan", "value": "Muse Code Everyday Usage"},
+  {"label": "5 hours", "value": "0%"},
+  {"label": "Weekly", "value": "23%"}
+ ],
+ "error": null
+}
+# Branch weekly value equals step 1 (22.58%); reset equals weekly_resets_at (1790553600).
+# Idle 5-hour window: 0% with no invented reset time.
+
+## 3. Default (no cookieSource configured) on the branch stays Off
+$ CODEXBAR_CONFIG=<tmp>/off.json MUSE_AUTH_PATH=<tmp>/auth.json CodexBarCLI usage --provider muse --format json
+oauth None ['Muse Code Everyday Usage', 'Not included in this login response']
+# Unconfigured installs make no dev.meta.ai request and read no browser cookies.
+
+## 4. Active window (earlier, 2026-09-25 22:45 AWST): subs_usage present, fallback not used
+# Brew and branch both returned source "oauth", 5 hours 6%, Weekly 17% — identical output.
