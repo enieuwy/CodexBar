@@ -39,7 +39,19 @@ Reset timestamps outside the supported date range are omitted without discarding
 
 Pay-as-you-go accounts without `is_subs_active` are reported as having no subscription rather than a fake 0% bar. Accounts that still need a payment method are reported as billing-incomplete.
 
-An active subscription whose mint response omits `subs_usage` or returns it as `null` keeps its plan and identity, with **Quota: Not included in this login response** and no quota bars. Malformed quota objects still fail parsing; missing windows never become invented 0% usage.
+An active subscription whose mint response omits `subs_usage` or returns it as `null` keeps its plan and identity. Meta omits `subs_usage` while the 5-hour window is idle, even when the weekly limit has usage.
+
+## Web quota fallback
+
+When `subs_usage` is missing, CodexBar reads the same subscription quota that the `dev.meta.ai/usage` page shows, using your browser session for `dev.meta.ai` (the `llama_dev_sess` cookie):
+
+1. `GET https://dev.meta.ai/api/auth/me`. The session email must match the CLI login email, or CodexBar ignores the web quota.
+2. `GET https://dev.meta.ai/api/portal/teams`
+3. `GET https://dev.meta.ai/api/portal/teams/{team_id}/subscription-quota` for up to two teams, using the first team that returns a quota.
+
+Usage is `used / limit` for the 5-hour and weekly weighted limits. An idle 5-hour window shows 0% with no reset time, because the window starts with the next request. The source label becomes `oauth+web`. The device-code token is sent only to `api.meta.ai`; `dev.meta.ai` requests carry only the browser cookie.
+
+**Settings → Providers → Muse Code → Cookie source** controls the fallback. It is **Off** by default, so CodexBar reads no browser data until you choose a source. **Automatic** imports the cookie from Chrome or Firefox, **Manual** uses a pasted Cookie header or cURL capture from `dev.meta.ai`. If the fallback is off, has no session, belongs to another account, is rejected, times out, or returns an unexpected shape, the card keeps **Quota: Not included in this login response** and no quota bars. Malformed mint quota objects still fail parsing; missing windows never become invented 0% usage.
 
 ## Local token history
 

@@ -142,6 +142,195 @@ struct MusePluginTests {
         #expect(snapshot.secondary?.resetsAt != nil)
     }
 
+    static let teams = #"{"teams":[{"team_id":906954075295332,"team_name":"My Team"}]}"#
+    static let me = #"{"userId":"1","email":"Ada@Example.com","accountType":"META_ACCOUNT"}"#
+
+    static let idleWindowQuota = #"""
+    {"subscription_quota":{"tier_id":"1","tier":"Muse Code Everyday Usage","as_of":1790341873,
+      "window_weighted_limit":"20000000000","window_duration_secs":18000,
+      "weekly_weighted_limit":"60000000000","weekly_resets_at":1790553600,
+      "window_weighted_used":"0","weekly_weighted_used":"9043782620"}}
+    """#
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `omitted login quotas fall back to the dev meta ai session`(engine: ProviderPluginEngineKind) async throws {
+        let requests = RequestLog()
+        let result = try await Self.fetchWithWeb(engine: engine, requests: requests) { path in
+            switch path {
+            case "/api/auth/me": (Self.me, 200)
+            case "/api/portal/teams": (Self.teams, 200)
+            case "/api/portal/teams/906954075295332/subscription-quota": (Self.idleWindowQuota, 200)
+            default: ("{}", 404)
+            }
+        }
+        let snapshot = result.usage
+        #expect(result.sourceLabel == "oauth+web")
+        #expect(snapshot.primary?.usedPercent == 0)
+        #expect(snapshot.primary?.windowMinutes == 300)
+        #expect(snapshot.primary?.resetsAt == nil)
+        let weekly = try #require(snapshot.secondary)
+        #expect(abs(weekly.usedPercent - 15.07297103) < 0.0001)
+        #expect(weekly.windowMinutes == 10080)
+        #expect(weekly.resetsAt == Date(timeIntervalSince1970: 1_790_553_600))
+        #expect(snapshot.dataConfidence == .exact)
+        #expect(snapshot.identity?.loginMethod == "Muse Code Power Usage")
+        let rows = snapshot.details.flatMap(\.rows)
+        #expect(rows.contains { $0.label == "Weekly" && $0.value == "15%" })
+        #expect(!rows.contains { $0.label == "Quota" })
+        let web = requests.all.filter { $0.url?.host == "dev.meta.ai" }
+        #expect(web.count == 3)
+        #expect(web.allSatisfy {
+            $0.value(forHTTPHeaderField: "Cookie") == "llama_dev_sess=fixture"
+                && $0.value(forHTTPHeaderField: "Authorization") == nil
+        })
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `reported login quotas never read the browser session`(engine: ProviderPluginEngineKind) async throws {
+        let requests = RequestLog()
+        let result = try await Self.fetchWithWeb(engine: engine, account: Self.account, requests: requests) { _ in
+            (Self.idleWindowQuota, 200)
+        }
+        #expect(result.sourceLabel == nil)
+        #expect(result.usage.primary?.usedPercent == 96)
+        #expect(!requests.all.contains { $0.url?.host == "dev.meta.ai" })
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `teams without a subscription are skipped`(engine: ProviderPluginEngineKind) async throws {
+        let result = try await Self.fetchWithWeb(engine: engine) { path in
+            switch path {
+            case "/api/auth/me": (Self.me, 200)
+            case "/api/portal/teams": (#"{"teams":[{"team_id":"11"},{"team_id":"22"}]}"#, 200)
+            case "/api/portal/teams/11/subscription-quota": (#"{"subscription_quota":null}"#, 200)
+            case "/api/portal/teams/22/subscription-quota": (Self.idleWindowQuota, 200)
+            default: ("{}", 404)
+            }
+        }
+        #expect(result.sourceLabel == "oauth+web")
+        #expect(result.usage.secondary != nil)
+    }
+
+    @Test(arguments: [
+        (#"{"error":"Not authenticated"}"#, 401),
+        (#"{"subscription_quota":{"window_weighted_limit":"0","window_weighted_used":"0"}}"#, 200),
+        ("<html>", 200),
+    ], BundledPluginTestSupport.engines)
+    func `unusable web quotas keep the login response result`(
+        quota: (body: String, status: Int),
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let rejected = RequestLog()
+        let result = try await Self.fetchWithWeb(engine: engine, rejected: rejected) { path in
+            switch path {
+            case "/api/auth/me": (Self.me, 200)
+            case "/api/portal/teams": (Self.teams, 200)
+            default: quota
+            }
+        }
+        #expect(result.sourceLabel == nil)
+        #expect(result.usage.primary == nil)
+        #expect(result.usage.secondary == nil)
+        #expect(result.usage.identity?.loginMethod == "Muse Code Power Usage")
+        #expect(result.usage.details.flatMap(\.rows).contains { $0.label == "Quota" })
+        #expect(rejected.domains == (quota.status == 401 ? ["dev.meta.ai"] : []))
+    }
+
+    @Test(arguments: [#"{"email":"bob@example.com"}"#, #"{"userId":"1"}"#], BundledPluginTestSupport.engines)
+    func `a browser session for another account never supplies quotas`(
+        me: String,
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let requests = RequestLog()
+        let result = try await Self.fetchWithWeb(engine: engine, requests: requests) { path in
+            switch path {
+            case "/api/auth/me": (me, 200)
+            case "/api/portal/teams": (Self.teams, 200)
+            default: (Self.idleWindowQuota, 200)
+            }
+        }
+        #expect(result.usage.secondary == nil)
+        #expect(result.usage.identity?.accountEmail == "ada@example.com")
+        #expect(!requests.all.contains { $0.url?.path.hasPrefix("/api/portal") == true })
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `disabled browser cookies never contact dev meta ai`(engine: ProviderPluginEngineKind) async throws {
+        let requests = RequestLog()
+        let result = try await Self.fetchWithWeb(engine: engine, cookieSource: .off, requests: requests) { _ in
+            (Self.idleWindowQuota, 200)
+        }
+        #expect(result.usage.secondary == nil)
+        #expect(!requests.all.contains { $0.url?.host == "dev.meta.ai" })
+    }
+
+    @Test(arguments: [
+        (ProviderConfig?.none, ProviderCookieSource.off),
+        (ProviderConfig(id: .muse), .off),
+        (ProviderConfig(id: .muse, cookieHeader: "llama_dev_sess=fixture"), .manual),
+        (ProviderConfig(id: .muse, cookieSource: .auto), .auto),
+    ])
+    func `browser session access stays off until configured`(
+        config: ProviderConfig?,
+        expected: ProviderCookieSource) throws
+    {
+        let contribution = try #require(MuseProviderDescriptor.descriptor.settingsSection
+            .credentialContribution(context: ProviderCredentialSettingsContext(config: config, account: nil)))
+        let settings = ProviderSettingsSnapshot(contributions: [contribution])
+        #expect(settings[MuseProviderSettingsKey.self]?.cookieSource == expected)
+    }
+
+    private final class RequestLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var requests: [URLRequest] = []
+        private var rejectedDomains: [String] = []
+        var all: [URLRequest] {
+            self.lock.withLock { self.requests }
+        }
+
+        var domains: [String] {
+            self.lock.withLock { self.rejectedDomains }
+        }
+
+        func append(_ request: URLRequest) {
+            self.lock.withLock { self.requests.append(request) }
+        }
+
+        func reject(_ domain: String) {
+            self.lock.withLock { self.rejectedDomains.append(domain) }
+        }
+    }
+
+    private static func fetchWithWeb(
+        engine: ProviderPluginEngineKind,
+        account: String = Self.activeWithoutWindows,
+        cookieSource: ProviderCookieSource = .auto,
+        requests: RequestLog = RequestLog(),
+        rejected: RequestLog = RequestLog(),
+        web: @escaping @Sendable (String) -> (String, Int)) async throws -> ProviderPluginResult
+    {
+        let runtime = try BundledPluginTestSupport.runtime(
+            "muse",
+            engine: engine,
+            transport: ProviderHTTPTransportHandler { request in
+                requests.append(request)
+                guard request.url?.host == "dev.meta.ai" else {
+                    return try Self.response(request, body: account)
+                }
+                let (body, status) = web(request.url?.path ?? "")
+                return try Self.response(request, body: body, status: status)
+            })
+        return try await runtime.fetchResult(
+            secrets: ["MUSE_DEVICE_TOKEN": "dca:fixture-token"],
+            now: Date(timeIntervalSince1970: 1_790_341_873),
+            cookieSource: cookieSource,
+            cookieInvalidator: { rejected.reject($0) },
+            cookieResolver: { _, domain in
+                #expect(domain == "dev.meta.ai")
+                return "llama_dev_sess=fixture"
+            })
+    }
+
     static func fetch(
         _ body: String,
         engine: ProviderPluginEngineKind,
